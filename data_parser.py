@@ -57,7 +57,7 @@ def load_dataset(n_samples=None, shuffle=False, delta_t=0.02):
         all_data.append(CQT_data)
         all_labels.append(labels)
         
-        print(f"Added: {CQT_data.shape} features, {labels.shape} labels")
+        print(f"Added: {CQT_data.shape} features, {labels.shape} labels", i)
 
     return all_data, all_labels
 
@@ -157,5 +157,23 @@ all_data, all_labels = load_dataset(n_samples=2)
 X = np.concatenate(all_data, axis=0)    # Shape: (total_frames, 88)
 y = np.concatenate(all_labels, axis=0)  # Shape: (total_frames, 88)
 
-print(f"All data samples: {X.shape}")
-print(f"All labels samples: {y.shape}")
+save_path = 'parsed data/'
+
+# save data
+np.savez(save_path + 'data_by_entry.npz', **{f'entry{i}': arr for i, arr in enumerate(all_data)})
+np.savez(save_path + 'label_by_entry.npz', **{f'entry{i}': arr for i, arr in enumerate(all_labels)})
+
+# Load back
+data = np.load(save_path + 'data_by_entry.npz')
+loaded_list = [data[f'entry{i}'] for i in range(len(data.files))]
+print(loaded_list)
+
+np.savez(save_path + 'unseparated_dataset.npz', features=X, labels=y)
+
+# Load back
+data = np.load(save_path + 'unseparated_dataset.npz')
+X_loaded = data['features']
+y_loaded = data['labels']
+
+print(f"All data samples: {X_loaded.shape}")
+print(f"All labels samples: {y_loaded.shape}")

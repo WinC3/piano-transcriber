@@ -9,7 +9,7 @@ import os
 
 csv_metadata_path = "MAESTRO Data\maestro-v1.0.0\maestro-v1.0.0.csv"
 
-def load_dataset(n_samples=None, shuffle=False, delta_t=0.02):
+def load_dataset(n_samples=None, shuffle=False, delta_t=0.08):
     metadata_df = pd.read_csv(csv_metadata_path)
     metadata_array = metadata_df.values
 
@@ -31,7 +31,7 @@ def load_dataset(n_samples=None, shuffle=False, delta_t=0.02):
 
         # CQT params
         hop_length = int(sr * delta_t)
-        n_bins = 88
+        n_bins = 115 # up to 20000 hz
         bins_per_octave = 12
         fmin = librosa.note_to_hz('A0')
 
@@ -43,7 +43,7 @@ def load_dataset(n_samples=None, shuffle=False, delta_t=0.02):
         # Load MIDI with note transition information
         labels, note_transitions = load_labels_with_transitions(midi_path, sr, hop_length, 
                                                               total_frames=CQT_data.shape[0], 
-                                                              n_bins=n_bins, fmin=fmin)
+                                                              n_bins=88, fmin=fmin)
         if labels is None:
             continue
 
@@ -166,35 +166,49 @@ def load_data(audio_path, hop_length=512, n_bins=88, bins_per_octave=12, fmin=27
     return CQT_data, sr
 
 
-def load_labels(midi_path, sr, hop_length, total_frames, n_bins=88, fmin=27.5):
+def load_labels_velocity(midi_path, sr, hop_length, total_frames, n_bins=88, 
+                        normalize=True, scale_type='linear'):
+    """
+    Load labels with velocity values
+    
+    Parameters:
+    normalize: If True, scale to 0-1; if False, use raw 0-127
+    scale_type: 'linear' (default), 'log', or 'sqrt' for different scaling
+    """
     mid = pretty_midi.PrettyMIDI(midi_path)
-
+    
     if mid is None:
         return None
     
-    # Create empty label matrix: (n_frames, n_bins)
-    labels = np.zeros((total_frames, n_bins), dtype=int)
+    labels = np.zeros((total_frames, n_bins), dtype=np.float32)
     
-    # For each instrument in the MIDI file
     for instrument in mid.instruments:
         for note in instrument.notes:
-            # Convert note to frequency bin
-            pitch = note.pitch
-            # Piano notes: 21 (A0) to 108 (C8)
-            # Our bins: 0-87 corresponding to A0-C8
-            bin_idx = pitch - 21  # Convert MIDI note number to bin index
+            bin_idx = note.pitch - 21
             
-            if 0 <= bin_idx < n_bins:  # Ensure it's within piano range
-                # Convert time to frame indices
+            if 0 <= bin_idx < n_bins:
                 start_frame = int(note.start * sr / hop_length)
                 end_frame = int(note.end * sr / hop_length)
                 
-                # Ensure frames are within bounds
                 start_frame = max(0, min(start_frame, total_frames - 1))
                 end_frame = max(0, min(end_frame, total_frames - 1))
                 
-                # Set labels to 1 for active note duration
-                labels[start_frame:end_frame, bin_idx] = 1
+                # Apply different velocity scaling
+                velocity = note.velocity
+                
+                if normalize:
+                    if scale_type == 'linear':
+                        value = velocity / 127.0
+                    elif scale_type == 'log':
+                        value = np.log1p(velocity) / np.log1p(127)  # log(1 + x) scaling
+                    elif scale_type == 'sqrt':
+                        value = np.sqrt(velocity) / np.sqrt(127)
+                    else:
+                        value = velocity / 127.0
+                else:
+                    value = velocity  # Raw 0-127
+                
+                labels[start_frame:end_frame, bin_idx] = value
     
     return labels
 
@@ -261,7 +275,6 @@ def save_parsed_data(n_samples=None):
 
     np.savez(save_path + 'cleaned_unseparated_dataset.npz', features=X, labels=y)
 
-
 def load_dataset_from_file(load_path='parsed data/unseparated_dataset.npz', n_samples=None, shuffle=False):
     # Load with memory-mapping - doesn't load data until accessed
     data = np.load(load_path, mmap_mode='r')
@@ -310,6 +323,6 @@ def shuffle_file(load_path='parsed data/unseparated_dataset.npz', seed=42):
 
 
 if __name__ == "__main__":
-    #shuffle_file(seed=0)
+    #shuffle_file(load_path='parsed data/cleaned_unseparated_dataset.npz', seed=0)
     save_parsed_data()
     #load_dataset_from_file()

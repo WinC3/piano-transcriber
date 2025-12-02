@@ -1,154 +1,232 @@
-import librosa
-import librosa.display
-import numpy as np
-import matplotlib.pyplot as plt
-
-import numpy as np
-from torch.autograd import Variable
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
 import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from data_parser import PianoRollDataset
+from nn_models import OnsetsAndFrames
+import os
+import sys
 
-import data_parser as dp
+def load_checkpoint(model, optimizer, checkpoint_path, device):
+    print(f"Loading checkpoint: {checkpoint_path}")
+    ckpt = torch.load(checkpoint_path, map_location=device)
 
-from nn_models import PitchCNN
-from nn_models import ensure_tensor, evaluate, train, ask_continue, WeightedMSELoss, calculate_note_weights, print_note_and_class_metrics
-import nn_models
+    model.load_state_dict(ckpt['model_state_dict'])
+    optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
-# Create a synthetic dataset where learning is guaranteed
-def create_synthetic_data():
-    # Simple pattern: first freq bin high = note present
-    data = torch.randn(15, 1, 256, 128) * 0.1  # noise
-    labels = torch.zeros(15, 88)
+    start_epoch = ckpt.get('epoch', 0)
+    loss_val = ckpt.get('loss', None)
+
+    print(f"Checkpoint loaded (epoch {start_epoch})")
+    return start_epoch
+
+# --- Configuration ---
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+BATCH_SIZE = 16
+TRAIN_DATA_DIR = "processed_maestro/train"
+VAL_DATA_DIR = "processed_maestro/validation"
+CHECKPOINT_DIR = "checkpoints"
+
+class Metrics:
+    """
+    Simple accumulator for Precision, Recall, and F1.
+    Calculates frame-wise metrics (good proxy for training progress).
+    """
+    def __init__(self):
+        self.reset()
     
-    # Make it learnable: when first frequency bin > 0.5, note is present
-    for i in range(15):
-        if torch.rand(1) > 0.5:  # 50% positive examples
-            data[i, 0, 0, :] = 1.0  # strong signal in first freq bin
-            labels[i, 0] = 1.0  # predict first note
+    def reset(self):
+        self.tp = 0
+        self.fp = 0
+        self.fn = 0
+        self.count = 0
+
+    def update(self, logits, targets, threshold=0.5):
+        # Apply sigmoid to convert logits to probabilities
+        probs = torch.sigmoid(logits)
+        preds = (probs > threshold).float()
+        targets = targets.float()
+
+        self.tp += (preds * targets).sum().item()
+        self.fp += (preds * (1 - targets)).sum().item()
+        self.fn += ((1 - preds) * targets).sum().item()
+        self.count += 1
+
+    def compute(self):
+        precision = self.tp / (self.tp + self.fp + 1e-8)
+        recall = self.tp / (self.tp + self.fn + 1e-8)
+        f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
+        return precision, recall, f1
+
+def get_user_input(current_lr):
+    print("\n--- Training Control ---")
+    while True:
+        try:
+            epochs_str = input(f"Enter number of epochs to train (0 to stop): ")
+            epochs = int(epochs_str)
+            if epochs < 0:
+                print("Please enter a positive number.")
+                continue
+            
+            if epochs == 0:
+                return 0, current_lr
+
+            lr_str = input(f"Enter Learning Rate (current: {current_lr}) [Press Enter to keep]: ")
+            if lr_str.strip() == "":
+                new_lr = current_lr
+            else:
+                new_lr = float(lr_str)
+            
+            return epochs, new_lr
+        except ValueError:
+            print("Invalid input. Please enter numbers.")
+
+def train():
+    # 1. Setup Data
+    if not os.path.exists(TRAIN_DATA_DIR):
+        print(f"Error: Directory {TRAIN_DATA_DIR} not found. Run preprocessing first.")
+        return
+
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+    train_dataset = PianoRollDataset(TRAIN_DATA_DIR, is_validation=False)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
     
-    return data, labels
+    val_dataset = PianoRollDataset(VAL_DATA_DIR, is_validation=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
-# Create obvious synthetic data
-def create_obvious_data():
-    data = torch.randn(10, 1, 256, 128) * 0.01  # Mostly noise
-    labels = torch.zeros(10, 88)
+    # 2. Init Model
+    model = OnsetsAndFrames().to(DEVICE)
     
-    # Make it OBVIOUS: specific pattern = specific note
-    for i in range(10):
-        if i < 5:  # First 5 samples: note 0 present
-            data[i, 0, 0:10, 0:10] = 10.0  # Very strong signal
-            labels[i, 0] = 1.0
-        else:  # Last 5 samples: note 1 present  
-            data[i, 0, 10:20, 10:20] = 10.0  # Very strong signal
-            labels[i, 1] = 1.0
+    # Default starting LR
+    current_lr = 0.0006
+    optimizer = optim.Adam(model.parameters(), lr=current_lr)
+
+    # ---- NEW CODE FOR RESUMING ----
+    resume_choice = input("Resume from checkpoint? (y/n): ").strip().lower()
+
+    start_epoch = 0
+    if resume_choice == "y":
+        ckpt_path = input("Enter checkpoint path (e.g., checkpoints/model_epoch_12.pth): ").strip()
+        if os.path.exists(ckpt_path):
+            start_epoch = load_checkpoint(model, optimizer, ckpt_path, DEVICE)
+            # also restore LR if changed in optimizer
+            current_lr = optimizer.param_groups[0]["lr"]
+        else:
+            print("Checkpoint path not found. Starting from scratch.")
+    # --------------------------------
+    total_epochs_trained = start_epoch
     
-    return data, labels
+    # Losses
+    bce_loss = nn.BCEWithLogitsLoss()
+    mse_loss = nn.MSELoss(reduction='none') 
 
-# Test with synthetic data
-#synth_data1, synth_labels1 = create_synthetic_data()
-#synth_data2, synth_labels2 = create_synthetic_data()
-#synth_data3, synth_labels3 = create_synthetic_data()
-# If this doesn't learn, the issue is in your training code
+    print(f"Model initialized on {DEVICE}")
 
-def main():
-    train_data, train_labels, valid_data, valid_labels, test_data, test_labels = dp.load_dataset_from_file(
-        'parsed data/shuffled_dataset_seed_0.npz', n_samples=None, shuffle=True)
-    #train_data, train_labels, valid_data, valid_labels, test_data, test_labels = synth_data1, synth_labels1, synth_data2, synth_labels2, synth_data3, synth_labels3
-    print(f"Train data shape: {train_data.shape}, Train labels shape: {train_labels.shape}")
-    print(f"Valid data shape: {valid_data.shape}, Valid labels shape: {valid_labels.shape}")
-    print(f"Test data shape: {test_data.shape}, Test labels shape: {test_labels.shape}")
-
-    # Convert to tensors
-    train_data = ensure_tensor(train_data)
-    train_labels = ensure_tensor(train_labels)
-    valid_data = ensure_tensor(valid_data)
-    valid_labels = ensure_tensor(valid_labels)
-    test_data = ensure_tensor(test_data)
-    test_labels = ensure_tensor(test_labels)
-
-    print(f"Train data tensor shape: {train_data.shape}, Train labels tensor shape: {train_labels.shape}")
-
-    #train_data = train_data.unsqueeze(1)  # add channel dim
-    #valid_data = valid_data.unsqueeze(1)  # add channel dim
-    #test_data = test_data.unsqueeze(1)  # add channel dim
-
-    # hyperparameters
-    lr = 0.05
-    #num_epoch = 0
-    lamb = 0#.00005
-    n_layers = 5
-    threshold = 0.1
-
-    train_accs, val_accs, test_accs = [], [], []
-
-    #torch.manual_seed(0)
-    print(f"Torch seed: {torch.seed()}")
-
-    # nn model
-    model = PitchCNN(num_notes=88, input_shape=(train_data.shape[1], train_data.shape[2], train_data.shape[3]))
-
-    train_acc = evaluate(model, train_data[:200000], train_labels[:200000])
-    val_acc = evaluate(model, valid_data, valid_labels)
-    test_acc = evaluate(model, test_data, test_labels)
-    print(f"Initial Model \t Train Acc: {train_acc:.4f} \t Valid Acc: {val_acc:.4f} \t Test Acc: {test_acc:.4f}")  
-
-    # See what the model is actually predicting
-    initial_predictions = model(train_data[:1000])
-    print("Prediction range:", initial_predictions.min().item(), initial_predictions.max().item())
-    print("Mean prediction:", initial_predictions.mean().item())
-    # If predictions are all near 0, model learned "always predict silence"
-
-    cur_epoch = 0
-    delta_loss = 0.0
-    while resp := ask_continue():
-        num_epoch = resp[0]
-        lr = resp[1]
-        if num_epoch is None:
-            print("Exiting training loop.")
+    # 3. Interactive Loop
+    while True:
+        epochs_to_run, current_lr = get_user_input(current_lr)
+        
+        if epochs_to_run == 0:
+            print("Stopping training.")
             break
-        for epoch in range(num_epoch):
-            train_losses, val_accuracies = train(model, lr, lamb, train_data, train_labels, valid_data, valid_labels, num_epoch=1,
-                                                  )
-            delta_loss -= train_losses[-1]
 
-            train_acc = evaluate(model, train_data[:200000], train_labels[:200000])
-            #val_acc = evaluate(model, valid_data, valid_labels)
-            val_acc = val_accuracies[-1]
-            test_acc = evaluate(model, test_data, test_labels)
+        # Update Optimizer LR
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = current_lr
 
-            train_accs.append(train_acc)
-            val_accs.append(val_acc)
-            test_accs.append(test_acc)
+        print(f"Training for {epochs_to_run} epochs with LR={current_lr}...")
 
-            # See what the model is actually predicting
-            initial_predictions = model(train_data[:1000])
-            print("Prediction range:", initial_predictions.min().item(), initial_predictions.max().item())
-            print("Mean prediction:", initial_predictions.mean().item())
-            # If predictions are all near 0, model learned "always predict silence"
+        for epoch in range(epochs_to_run):
+            model.train()
+            
+            # Metrics for this epoch
+            train_onset_metrics = Metrics()
+            train_frame_metrics = Metrics()
+            total_train_loss = 0
+            
+            # --- TRAINING PHASE ---
+            print(f"\nEpoch {total_epochs_trained + 1} (Training)...")
+            for batch_idx, batch in enumerate(train_loader):
+                audio = batch['audio'].to(DEVICE)
+                onset_label = batch['onset'].to(DEVICE)
+                frame_label = batch['frame'].to(DEVICE)
+                velocity_label = batch['velocity'].to(DEVICE)
+                
+                optimizer.zero_grad()
+                outputs = model(audio)
+                
+                # Calculate Losses
+                loss_onset = bce_loss(outputs['onset'], onset_label)
+                loss_frame = bce_loss(outputs['frame'], frame_label)
+                
+                vel_loss_raw = mse_loss(outputs['velocity'], velocity_label)
+                onset_mask = (onset_label == 1).float()
+                loss_velocity = (vel_loss_raw * onset_mask).sum() / (onset_mask.sum() + 1e-6)
+                
+                loss = loss_onset + loss_frame + loss_velocity
+                
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), 3.0)
+                optimizer.step()
+                
+                # Update Metrics
+                train_onset_metrics.update(outputs['onset'], onset_label)
+                train_frame_metrics.update(outputs['frame'], frame_label)
+                total_train_loss += loss.item()
 
-            print(f"Final Model Epoch {cur_epoch} \t Change in loss: {delta_loss:.12f} \t Train Acc: {train_acc:.4f} \t Valid Acc: {val_acc:.4f} \t Test Acc: {test_acc:.4f}")
-            cur_epoch += 1
-            delta_loss = train_losses[-1]
-        nn_models.visualize_feature_maps(model, train_data[0:1][0])
-        print_note_and_class_metrics(valid_labels, model(valid_data))
+                if batch_idx % 1 == 0:
+                    # Quick print of loss to show life
+                    print(f"  Batch {batch_idx}/{len(train_loader)} | Loss: {loss.item():.8f}", end='\r')
 
-    torch.save(model.state_dict(), f"cnn_acc{test_acc:.4f}.pth")
+            # --- VALIDATION PHASE ---
+            model.eval()
+            val_loss = 0
+            val_onset_metrics = Metrics()
+            val_frame_metrics = Metrics()
 
-    # final model plots
-    plt.plot(range(cur_epoch), train_accs, label='Training Accuracy', color='blue')
-    plt.plot(range(cur_epoch), val_accs, label='Validation Accuracy', color='green')
-    plt.axhline(y=test_acc, linestyle='--', color='red', label='Final Model Test Accuracy')
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy')
-    plt.title('Final Model Accuracies over Epochs')
-    plt.legend()
+            with torch.no_grad():
+                for batch in val_loader:
+                    audio = batch['audio'].to(DEVICE)
+                    onset_label = batch['onset'].to(DEVICE)
+                    frame_label = batch['frame'].to(DEVICE)
+                    velocity_label = batch['velocity'].to(DEVICE)
+                    
+                    outputs = model(audio)
+                    
+                    l_o = bce_loss(outputs['onset'], onset_label)
+                    l_f = bce_loss(outputs['frame'], frame_label)
+                    val_loss += (l_o + l_f).item()
 
-    plt.tight_layout()
-    plt.savefig(f"{lr} lr, {cur_epoch} epochs, {n_layers} layers.png")
+                    val_onset_metrics.update(outputs['onset'], onset_label)
+                    val_frame_metrics.update(outputs['frame'], frame_label)
 
+            # --- EPOCH SUMMARY ---
+            # Compute final metrics
+            tr_o_p, tr_o_r, tr_o_f1 = train_onset_metrics.compute()
+            tr_f_p, tr_f_r, tr_f_f1 = train_frame_metrics.compute()
+            
+            val_o_p, val_o_r, val_o_f1 = val_onset_metrics.compute()
+            val_f_p, val_f_r, val_f_f1 = val_frame_metrics.compute()
+
+            print(f"\nCompleted Epoch {total_epochs_trained + 1}")
+            print("-" * 60)
+            print(f"Train Loss: {total_train_loss/len(train_loader):.8f} | Val Loss: {val_loss/len(val_loader):.8f}")
+            print(f"ONSET F1  - Train: {tr_o_f1:.5f} (P:{tr_o_p:.5f} R:{tr_o_r:.5f}) | Val: {val_o_f1:.5f}")
+            print(f"FRAME F1  - Train: {tr_f_f1:.5f} (P:{tr_f_p:.5f} R:{tr_f_r:.5f}) | Val: {val_f_f1:.5f}")
+            print("-" * 60)
+
+            total_epochs_trained += 1
+
+            # Save Checkpoint
+            checkpoint_path = os.path.join(CHECKPOINT_DIR, f"model_epoch_{total_epochs_trained}.pth")
+            torch.save({
+                'epoch': total_epochs_trained,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': total_train_loss,
+            }, checkpoint_path)
+            print(f"Checkpoint saved: {checkpoint_path}")
 
 if __name__ == "__main__":
-    main()
+    train()

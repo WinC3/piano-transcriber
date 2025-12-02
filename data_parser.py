@@ -1,438 +1,67 @@
-import librosa
-import librosa.display
-import numpy as np
-import pandas as pd
-
-import pretty_midi
-
+import torch
 import os
+import glob
+from torch.utils.data import Dataset
+import numpy as np
 
-csv_metadata_path = "MAESTRO Data\maestro-v1.0.0\maestro-v1.0.0.csv"
+import warnings
 
-def load_dataset(n_samples=None, shuffle=False, delta_t=0.04):
-    metadata_df = pd.read_csv(csv_metadata_path)
-    metadata_array = metadata_df.values
+SEQUENCE_LENGTH = 640 # ~20 seconds at 16khz/512 hop
 
-    if shuffle:
-        np.random.shuffle(metadata_array)
+class PianoRollDataset(Dataset):
+    def __init__(self, data_dir, sequence_length=SEQUENCE_LENGTH, is_validation=False):
+        """
+        data_dir: Path to the 'train' or 'validation' folder containing .pt files
+        """
+        self.files = glob.glob(os.path.join(data_dir, "*.pt"))
+        self.sequence_length = sequence_length
+        self.is_validation = is_validation
 
-    if n_samples is not None:
-        metadata_array = metadata_array[:n_samples]
+    def __len__(self):
+        return len(self.files)
 
-    all_data, all_labels = [], []
-    
-    for i, sample in enumerate(metadata_array):
-        audio_path = os.path.normpath("MAESTRO Data/maestro-v1.0.0/" + sample[5])
-        midi_path = os.path.normpath("MAESTRO Data/maestro-v1.0.0/" + sample[4])
-
-        y, sr = load_audio(audio_path)
-        if y is None or sr is None:
-            continue
-
-        # CQT params
-        hop_length = int(sr * delta_t)
-        n_bins = 115 # up to 20000 hz
-        bins_per_octave = 12
-        fmin = librosa.note_to_hz('A0')
-
-        CQT_data, sr = load_data(audio_path, hop_length=hop_length, n_bins=n_bins, 
-                           bins_per_octave=bins_per_octave, fmin=fmin)
-        if CQT_data is None:
-            continue
+    def __getitem__(self, idx):
+        path = self.files[idx]
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            data = torch.load(path)
         
-        # Load MIDI with note transition information
-        labels, note_transitions = load_labels_with_transitions(midi_path, sr, hop_length, 
-                                                              total_frames=CQT_data.shape[0], 
-                                                              n_bins=88, fmin=fmin)
-        if labels is None:
-            continue
-
-        # REMOVE FRAMES WHERE NOTE TRANSITIONS OCCUR
-        stable_mask = ~note_transitions  # True for stable frames, False for transition frames
-        CQT_stable = CQT_data[stable_mask]
-        labels_stable = labels[stable_mask]
+        # Unpack
+        # Note: We saved as half/bool to save disk space, convert back to float for training
+        full_audio = data['audio'].float()
+        full_onset = data['onset'].float()
+        full_frame = data['frame'].float()
+        full_velocity = data['velocity'].float()
         
-        if len(CQT_stable) == 0:
-            print(f"Skipping {audio_path} - no stable frames after transition removal")
-            continue
-
-        print(f"Original: {CQT_data.shape}, After transition removal: {CQT_stable.shape}")
-        print(f"Removed {len(CQT_data) - len(CQT_stable)} transition frames")
-
-        X, Y = create_context_windows(CQT_stable, labels_stable, context_size=4)
-        all_data.append(X)
-        all_labels.append(Y)
+        total_frames = full_audio.shape[0]
         
-        #print(f"Added: {CQT_stable.shape} features, {labels_stable.shape} labels - File {i+1}")
-        print(f"Added: {X.shape} features, {Y.shape} labels - File {i+1}")
-
-    return all_data, all_labels
-
-    #train_ratio = 0.7
-    #val_ratio = 0.15
-
-    # Split into train/validation/test
-    #return split_data(all_data, all_labels, train_ratio, val_ratio)
-
-def create_context_windows(features, labels, context_size=8):
-    """
-    Convert frame-level features into overlapping time windows.
-
-    features: (time, freq_bins)
-    labels:   (time, n_notes)
-    context_size: number of frames per window
-    """
-    X, Y = [], []
-    half = context_size // 2
-    T = features.shape[0]
-
-    for t in range(half, T - half):
-        label = labels[t]
-        skip_window = False
-        for t_prime in range(t - half, t + half + 1):
-            if (labels[t_prime] != label).any():
-                #print(f"Skipping window centered at frame {t} due to label change at frame {t_prime}")
-                skip_window = True
-                break   # skip windows with label changes
-        if skip_window:
-            continue
-        window = features[t - half : t + half + 1]   # shape: (context_size, freq_bins)
-        X.append(window.T)   # transpose → (freq_bins, context_size)
-        Y.append(labels[t])  # label = center frame
-
-    return np.stack(X), np.stack(Y)
-
-def normalize_data(data, method='standard', feature_axis=2, params=None):
-    """
-    Normalize data using different methods
-    
-    Parameters:
-    data: numpy array of shape (samples, channels, freq_bins, context_size)
-    method: 'standard' (z-score), 'minmax', 'per_channel', or 'spec_norm'
-    feature_axis: which axis contains the features to normalize (usually freq_bins)
-    params: pre-computed normalization parameters (if None, computes from data)
-    
-    Returns:
-    normalized_data, normalization_params (for inverse if needed)
-    """
-    if params is not None:
-        # Use pre-computed parameters
-        method = params['method']
-        print(f"Using pre-computed {method} normalization parameters")
-        
-        if method == 'standard':
-            normalized = (data - params['mean']) / params['std']
-        elif method == 'minmax':
-            normalized = (data - params['min']) / (params['max'] - params['min'] + 1e-8)
-        elif method == 'per_channel':
-            normalized = (data - params['mean']) / params['std']
-        elif method == 'spec_norm':
-            normalized = (data - params['min']) / (params['max'] - params['min'] + 1e-8)
+        # Random Crop
+        if total_frames <= self.sequence_length:
+            # Padding if file is shorter than sequence (rare in MAESTRO)
+            pad_len = self.sequence_length - total_frames
+            audio = torch.nn.functional.pad(full_audio, (0, 0, 0, pad_len))
+            onset = torch.nn.functional.pad(full_onset, (0, 0, 0, pad_len))
+            frame = torch.nn.functional.pad(full_frame, (0, 0, 0, pad_len))
+            velocity = torch.nn.functional.pad(full_velocity, (0, 0, 0, pad_len))
         else:
-            raise ValueError(f"Unknown normalization method in params: {method}")
-    
-    else:
-        # Compute new parameters from data
-        if method == 'standard':
-            # Z-score normalization: (x - mean) / std
-            mean = np.mean(data, axis=feature_axis, keepdims=True)
-            std = np.std(data, axis=feature_axis, keepdims=True)
-            std = np.maximum(std, 1e-8)  # Avoid division by zero
-            normalized = (data - mean) / std
-            params = {'method': 'standard', 'mean': mean, 'std': std}
-            
-        elif method == 'minmax':
-            # Scale to [0, 1] range
-            data_min = np.min(data, axis=feature_axis, keepdims=True)
-            data_max = np.max(data, axis=feature_axis, keepdims=True)
-            normalized = (data - data_min) / (data_max - data_min + 1e-8)
-            params = {'method': 'minmax', 'min': data_min, 'max': data_max}
-            
-        elif method == 'per_channel':
-            # Normalize each frequency bin independently
-            mean = np.mean(data, axis=(0, 3), keepdims=True)  # Mean over samples and time context
-            std = np.std(data, axis=(0, 3), keepdims=True)
-            std = np.maximum(std, 1e-8)
-            normalized = (data - mean) / std
-            params = {'method': 'per_channel', 'mean': mean, 'std': std}
-            
-        elif method == 'spec_norm':
-            # Spectral normalization: scale each spectrogram independently
-            # Useful for audio where absolute magnitude varies
-            data_min = np.min(data, axis=(2, 3), keepdims=True)  # Min over freq and time
-            data_max = np.max(data, axis=(2, 3), keepdims=True)  # Max over freq and time
-            normalized = (data - data_min) / (data_max - data_min + 1e-8)
-            params = {'method': 'spec_norm', 'min': data_min, 'max': data_max}
-        
-        else:
-            raise ValueError(f"Unknown normalization method: {method}")
-        
-        print(f"Computed {method} normalization: range [{normalized.min():.3f}, {normalized.max():.3f}]")
-    
-    np.savez('parsed data/normalization_params.npz', **params)
-
-    return normalized, params
-
-
-def split_data_by_track(all_data, all_labels, train_ratio=0.7, val_ratio=0.15):
-    """Split data into train, validation, and test sets by track"""
-    total_samples = len(all_data)
-    
-    # Calculate split indices
-    train_end = int(total_samples * train_ratio)
-    val_end = train_end + int(total_samples * val_ratio)
-    
-    # Split the data
-    train_data = all_data[:train_end]
-    train_labels = all_labels[:train_end]
-    
-    valid_data = all_data[train_end:val_end]
-    valid_labels = all_labels[train_end:val_end]
-    
-    test_data = all_data[val_end:]
-    test_labels = all_labels[val_end:]
-    
-    print(f"Split: {len(train_data)} train, {len(valid_data)} validation, {len(test_data)} test")
-    
-    return train_data, train_labels, valid_data, valid_labels, test_data, test_labels
-
-
-def split_data(all_data, all_labels, train_ratio=0.7, val_ratio=0.15, shuffle=True):
-    """Split data into train, validation, and test sets by individual frames
-    
-    Parameters:
-    all_data: list of numpy arrays or single numpy array where each row is a frame
-    all_labels: list of numpy arrays or single numpy array where each row is a frame
-    train_ratio: proportion of frames for training
-    val_ratio: proportion of frames for validation
-    
-    Returns:
-    Split arrays in the same format as input
-    """
-    
-    # Handle both single array and list of arrays input
-    if isinstance(all_data, np.ndarray):
-        all_data = [all_data]
-    if isinstance(all_labels, np.ndarray):
-        all_labels = [all_labels]
-    
-    # Concatenate all frames into single arrays
-    X_combined = np.concatenate(all_data, axis=0)
-    y_combined = np.concatenate(all_labels, axis=0)
-    
-    total_frames = len(X_combined)
-    print(f"Total frames: {total_frames}")
-
-    # Shuffle if requested
-    if shuffle:
-        print("Shuffling frames before splitting...")
-        indices = np.random.permutation(total_frames)
-        X_combined = X_combined[indices]
-        y_combined = y_combined[indices]
-    
-    # Calculate split indices
-    train_end = int(total_frames * train_ratio)
-    val_end = train_end + int(total_frames * val_ratio)
-    
-    # Split the frames
-    train_data = X_combined[:train_end]
-    train_labels = y_combined[:train_end]
-    
-    valid_data = X_combined[train_end:val_end]
-    valid_labels = y_combined[train_end:val_end]
-    
-    test_data = X_combined[val_end:]
-    test_labels = y_combined[val_end:]
-    
-    print(f"Split: {len(train_data)} train frames, {len(valid_data)} validation frames, {len(test_data)} test frames")
-    
-    return train_data, train_labels, valid_data, valid_labels, test_data, test_labels
-
-
-def load_data(audio_path, hop_length=512, n_bins=88, bins_per_octave=12, fmin=27.5):
-    y, sr = load_audio(audio_path)
-
-    if y is None or sr is None:
-        return None, None
-
-    # CQT
-    C = librosa.cqt(y, sr=sr, hop_length=hop_length,
-                    n_bins=n_bins, bins_per_octave=bins_per_octave,
-                    fmin=fmin)
-
-    # to dB
-    C_db = librosa.amplitude_to_db(np.abs(C), ref=np.max)
-
-    CQT_data = C_db.T # time x n_bins
-    return CQT_data, sr
-
-
-def load_labels_velocity(midi_path, sr, hop_length, total_frames, n_bins=88, 
-                        normalize=True, scale_type='linear'):
-    """
-    Load labels with velocity values
-    
-    Parameters:
-    normalize: If True, scale to 0-1; if False, use raw 0-127
-    scale_type: 'linear' (default), 'log', or 'sqrt' for different scaling
-    """
-    mid = pretty_midi.PrettyMIDI(midi_path)
-    
-    if mid is None:
-        return None
-    
-    labels = np.zeros((total_frames, n_bins), dtype=np.float32)
-    
-    for instrument in mid.instruments:
-        for note in instrument.notes:
-            bin_idx = note.pitch - 21
-            
-            if 0 <= bin_idx < n_bins:
-                start_frame = int(note.start * sr / hop_length)
-                end_frame = int(note.end * sr / hop_length)
+            if self.is_validation:
+                # Deterministic crop for validation (e.g., start)
+                start = 0
+            else:
+                # Random crop for training
+                max_start = total_frames - self.sequence_length
+                start = np.random.randint(0, max_start)
                 
-                start_frame = max(0, min(start_frame, total_frames - 1))
-                end_frame = max(0, min(end_frame, total_frames - 1))
-                
-                # Apply different velocity scaling
-                velocity = note.velocity
-                
-                if normalize:
-                    if scale_type == 'linear':
-                        value = velocity / 127.0
-                    elif scale_type == 'log':
-                        value = np.log1p(velocity) / np.log1p(127)  # log(1 + x) scaling
-                    elif scale_type == 'sqrt':
-                        value = np.sqrt(velocity) / np.sqrt(127)
-                    else:
-                        value = velocity / 127.0
-                else:
-                    value = velocity  # Raw 0-127
-                
-                labels[start_frame:end_frame, bin_idx] = value
-    
-    return labels
-
-
-def load_labels_with_transitions(midi_path, sr, hop_length, total_frames, n_bins=88, fmin=27.5):
-    """
-    Load labels and also identify frames where note transitions occur
-    """
-    try:
-        mid = pretty_midi.PrettyMIDI(midi_path)
-    except:
-        return None, None
-    
-    # Create label matrix and transition flag array
-    labels = np.zeros((total_frames, n_bins), dtype=int)
-    has_transition = np.zeros(total_frames, dtype=bool)  # True if frame has note change
-    
-    frame_duration = hop_length / sr  # Time per frame in seconds
-    
-    for instrument in mid.instruments:
-        for note in instrument.notes:
-            # Convert MIDI note to bin index
-            bin_idx = note.pitch - 21  # A0 = MIDI 21 → bin 0
-            if bin_idx < 0 or bin_idx >= n_bins:
-                continue
+            end = start + self.sequence_length
             
-            # Convert time to frame indices
-            start_frame = int(note.start * sr / hop_length)
-            end_frame = int(note.end * sr / hop_length)
-            
-            # Mark the frame where note STARTS as transition
-            if start_frame < total_frames:
-                has_transition[start_frame] = True
-            
-            # Mark the frame where note ENDS as transition  
-            if end_frame < total_frames:
-                has_transition[end_frame] = True
-            
-            # Mark active note duration (excluding transition frames)
-            for frame in range(start_frame + 1, end_frame):  # Skip start frame
-                if frame < total_frames:
-                    labels[frame, bin_idx] = 1
-    
-    return labels, has_transition
+            audio = full_audio[start:end]
+            onset = full_onset[start:end]
+            frame = full_frame[start:end]
+            velocity = full_velocity[start:end]
 
-
-def load_audio(file_path):
-    y, sr = librosa.load(file_path, sr=None)
-    return y, sr
-
-
-def save_parsed_data(n_samples=None):
-
-    all_data, all_labels = load_dataset(n_samples=n_samples)
-
-    X = np.concatenate(all_data, axis=0)    # Shape: (total_frames, 88)
-    y = np.concatenate(all_labels, axis=0)  # Shape: (total_frames, 88)
-
-    X = X[:, np.newaxis, :, :]  # add channel dim → (total_frames, 1, 88, context_size)
-
-    save_path = 'parsed data/'
-
-    # save data
-    #np.savez(save_path + 'data_by_entry.npz', **{f'entry{i}': arr for i, arr in enumerate(all_data)})
-    #np.savez(save_path + 'label_by_entry.npz', **{f'entry{i}': arr for i, arr in enumerate(all_labels)})
-
-    np.savez(save_path + 'cnn_dataset.npz', features=X, labels=y)
-
-def load_dataset_from_file(load_path='parsed data/unseparated_dataset.npz', n_samples=None, shuffle=False, normalize=True, norm_method='standard'):
-    # Load with memory-mapping - doesn't load data until accessed
-    data = np.load(load_path, mmap_mode='r')
-    X = data['features'][:n_samples]
-    y = data['labels'][:n_samples]
-    print(f"Loaded data samples: {X.shape}")
-    print(f"Loaded labels samples: {y.shape}")
-
-    # NEW: Normalize if requested
-    if normalize:
-        print("\n=== Normalizing Loaded Data ===")
-        X_normalized, norm_params = normalize_data(X, method=norm_method)
-        X = X_normalized
-        print(f"After normalization: {X.shape}")
-
-    # Split into train/validation/test
-    return split_data([X], [y], train_ratio=0.7, val_ratio=0.15, shuffle=shuffle)
-
-
-def shuffle_file(load_path='parsed data/unseparated_dataset.npz', seed=42):
-    data = np.load(load_path, mmap_mode='r')
-    print("Loaded data for shuffling.")
-    X = data['features']
-    y = data['labels']
-    total_frames = len(X)
-    
-    np.random.seed(seed)
-    indices = np.random.permutation(total_frames)
-    
-    # Create memory-mapped output files
-    X_shuffled = np.memmap('temp_X.dat', dtype=X.dtype, mode='w+', shape=X.shape)
-    y_shuffled = np.memmap('temp_Y.dat', dtype=y.dtype, mode='w+', shape=y.shape)
-    print("Created memory-mapped files for shuffled data.")
-    
-    # Shuffle in batches
-    batch_size = 50000
-    for i in range(0, total_frames, batch_size):
-        batch_indices = indices[i:i+batch_size]
-        X_shuffled[i:i+batch_size] = X[batch_indices]
-        y_shuffled[i:i+batch_size] = y[batch_indices]
-    print("Shuffling complete.")
-    
-    # Save final result
-    np.savez(f'parsed data/shuffled_dataset_seed_{seed}.npz', 
-             features=X_shuffled, labels=y_shuffled)
-    print(f"Shuffled dataset saved to 'parsed data/shuffled_dataset_seed_{seed}.npz'")
-    
-    # Cleanup temp files
-    del X_shuffled, y_shuffled
-    os.remove('temp_X.dat')
-    os.remove('temp_Y.dat')
-    print("Temporary files removed.")
-
-
-if __name__ == "__main__":
-    #shuffle_file(load_path='parsed data/cnn_dataset.npz', seed=0)
-    #save_parsed_data()
-    load_dataset_from_file('parsed data\cnn_dataset.npz')
+        return {
+            "audio": audio,     # (T, F)
+            "onset": onset,     # (T, 88)
+            "frame": frame,     # (T, 88)
+            "velocity": velocity # (T, 88)
+        }

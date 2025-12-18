@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from audio.data_parser import PianoRollDataset
-from transcriber.model.nn_models import OnsetsAndFrames
+from piano_transcriber.model.nn_models import OnsetsAndFrames
 import os
 import sys
 

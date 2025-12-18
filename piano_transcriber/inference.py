@@ -59,7 +59,9 @@ class PianoTranscriber:
             self.model = OnsetsAndFrames().to(self.device)
             
             # Load checkpoint (inference-only, no optimizer state needed)
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=FutureWarning)
+                checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.model.eval()
             
@@ -253,18 +255,20 @@ class PianoTranscriber:
             onset_frames = torch.where(onset_pred[:, pitch_idx] == 1)[0]
             
             for onset_frame in onset_frames:
-                onset_time = onset_frame.item() * frame_time
-                velocity = max(1, min(127, int(velocity_pred[onset_frame, pitch_idx].item() * 127)))
+                onset_idx = onset_frame.item() if hasattr(onset_frame, 'item') else onset_frame
+                onset_time = onset_idx * frame_time
+                velocity = max(1, min(127, int(velocity_pred[onset_idx, pitch_idx].item() * 127)))
                 
                 # Find note end (when frame prediction stops)
-                end_frame = onset_frame
-                for f in range(onset_frame, len(frame_pred)):
+                end_frame = onset_idx
+                for f in range(onset_idx, len(frame_pred)):
                     if frame_pred[f, pitch_idx] == 1:
                         end_frame = f
                     else:
                         break
                 
-                end_time = end_frame.item() * frame_time
+                end_idx = end_frame.item() if hasattr(end_frame, 'item') else end_frame
+                end_time = end_idx * frame_time
                 
                 # Only add notes with reasonable duration
                 if end_time > onset_time:
@@ -309,18 +313,20 @@ class PianoTranscriber:
             onset_frames = torch.where(onset_pred[:, pitch_idx] == 1)[0]
             
             for onset_frame in onset_frames:
-                onset_time = onset_frame.item() * frame_time
-                velocity = velocity_pred[onset_frame, pitch_idx].item()
+                onset_idx = onset_frame.item() if hasattr(onset_frame, 'item') else onset_frame
+                onset_time = onset_idx * frame_time
+                velocity = velocity_pred[onset_idx, pitch_idx].item()
                 
                 # Find note end
-                end_frame = onset_frame
-                for f in range(onset_frame, len(frame_pred)):
+                end_frame = onset_idx
+                for f in range(onset_idx, len(frame_pred)):
                     if frame_pred[f, pitch_idx] == 1:
                         end_frame = f
                     else:
                         break
                 
-                end_time = end_frame.item() * frame_time
+                end_idx = end_frame.item() if hasattr(end_frame, 'item') else end_frame
+                end_time = end_idx * frame_time
                 
                 if end_time > onset_time:
                     note = {
@@ -335,7 +341,7 @@ class PianoTranscriber:
         return sorted(notes, key=lambda x: x['start_time'])
 
 
-def get_latest_checkpoint(checkpoint_dir: Union[str, Path] = "transcriber/model") -> Optional[str]:
+def get_latest_checkpoint(checkpoint_dir: Union[str, Path] = "piano_transcriber/model") -> Optional[str]:
     """
     Find the latest model checkpoint in the model directory.
     

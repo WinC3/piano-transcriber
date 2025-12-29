@@ -1,0 +1,12 @@
+# Web platform temporary files
+uploads/
+temp/
+*.tmp
+*.temp
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.local

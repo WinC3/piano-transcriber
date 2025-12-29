@@ -1,8 +1,143 @@
-__pycache__/*
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
 
-checkpoints
-MAESTRO Data
-NN Graphs
-NN Saved Models
-parsed data
-processed_maestro
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec.bak
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Model files and training data (large files)
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.hdf5
+
+# Data directories (large datasets)
+MAESTRO Data/
+processed_maestro/
+parsed data/
+sample audio/
+SampleAudioWav/
+
+# Output directories
+NN Graphs/
+NN Saved Models/
+outputs/
+results/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Audio/MIDI files (except examples)
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.mid
+*.midi
+!examples/*.wav
+!examples/*.mp3
+!examples/*.mid
+
+# Web platform temporary files
+piano_transcriber/web/uploads/
+piano_transcriber/web/temp/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment variables
+.env
+.env.local
+.env.production
+.env.test
+
+# Docker
+.dockerignore
+
+# MacOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk

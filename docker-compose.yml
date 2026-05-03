@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  piano-transcriber-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount uploads directory for persistence
+      - ./uploads:/app/uploads
+      # Mount a specific checkpoint if you want to use a different model
+      # - ./checkpoints/model_epoch_1700.pth:/app/checkpoints/model_epoch_1700.pth
+    environment:
+      - PYTORCH_JIT=0
+      - TORCH_HOME=/tmp
+      - TRANSCRIBER_MODEL_PATH=/app/checkpoints/model_epoch_1700.pth
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+# Optional: Add a reverse proxy with SSL
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # Add SSL certificates here if needed
+      # - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - piano-transcriber-web
+    restart: unless-stopped
+    profiles:
+      - production
+
+networks:
+  default:
+    driver: bridge

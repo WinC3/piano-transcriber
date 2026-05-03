@@ -1,0 +1,44 @@
+# Dockerfile for Piano Transcription Web Platform
+# Optimized for CPU inference with minimal dependencies
+
+FROM python:3.9-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies for audio processing
+RUN apt-get update && apt-get install -y \
+    libsndfile1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY piano_transcriber/web/requirements-web.txt ./requirements-web.txt
+COPY requirements.txt ./requirements.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements-web.txt
+
+# Copy application code
+COPY piano_transcriber/ ./piano_transcriber/
+COPY checkpoints/ ./checkpoints/
+
+# Create upload and temp directories
+RUN mkdir -p /app/uploads /app/temp
+
+# Expose port
+EXPOSE 8000
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV PYTORCH_JIT=0
+ENV TORCH_HOME=/tmp
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD curl -f http://localhost:8000/health || exit 1
+
+# Run the application
+CMD ["uvicorn", "piano_transcriber.web.app:app", "--host", "0.0.0.0", "--port", "8000"]

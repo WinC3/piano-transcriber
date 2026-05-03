@@ -134,7 +134,7 @@ async def process_transcription(job_id: str):
         notes = transcriber.predictions_to_json(predictions)
         
         # Calculate duration from audio file
-        waveform, sample_rate = torchaudio.load(job["temp_path"])
+        waveform, sample_rate = torchaudio.load(job["temp_path"], backend="soundfile")
         duration = waveform.shape[1] / sample_rate
         
         # Update job with results (no binary data)

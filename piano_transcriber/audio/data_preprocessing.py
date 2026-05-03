@@ -1,6 +1,7 @@
 import os
 import torch
 import torchaudio
+import soundfile as sf
 import pretty_midi
 import pandas as pd
 from tqdm import tqdm
@@ -19,8 +20,15 @@ MEL_FMAX = SAMPLE_RATE // 2
 WINDOW_LENGTH = 2048
 
 def compute_log_mel(audio_path):
-    # Load audio
-    audio, sr = torchaudio.load(audio_path)
+    # Load audio using soundfile (avoids torchcodec/FFmpeg dependency)
+    audio_np, sr = sf.read(audio_path, dtype='float32')
+    # Convert to torch tensor with shape (channels, samples)
+    audio = torch.from_numpy(audio_np).float()
+    if audio.ndim == 1:
+        audio = audio.unsqueeze(0)
+    else:
+        audio = audio.T  # soundfile returns (samples, channels), we need (channels, samples)
+
     if sr != SAMPLE_RATE:
         resampler = torchaudio.transforms.Resample(sr, SAMPLE_RATE)
         audio = resampler(audio)

@@ -15,7 +15,7 @@ services:
     environment:
       - PYTORCH_JIT=0
       - TORCH_HOME=/tmp
-      - TRANSCRIBER_MODEL_PATH=/app/checkpoints/model_epoch_1700.pth
+      - TRANSCRIBER_MODEL_PATH=/app/checkpoints/model_epoch_2454.pth
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

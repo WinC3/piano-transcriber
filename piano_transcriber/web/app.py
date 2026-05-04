@@ -14,7 +14,7 @@ from typing import Dict, Any, Optional
 
 import uvicorn
 import torch
-import torchaudio
+import soundfile as sf
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -60,7 +60,7 @@ def get_transcriber() -> PianoTranscriber:
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     """Serve the main web interface."""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request, "index.html")
 
 @app.post("/transcribe")
 async def transcribe_audio(
@@ -134,8 +134,8 @@ async def process_transcription(job_id: str):
         notes = transcriber.predictions_to_json(predictions)
         
         # Calculate duration from audio file
-        waveform, sample_rate = torchaudio.load(job["temp_path"], backend="soundfile")
-        duration = waveform.shape[1] / sample_rate
+        audio_info = sf.info(job["temp_path"])
+        duration = audio_info.duration
         
         # Update job with results (no binary data)
         job["status"] = "completed"

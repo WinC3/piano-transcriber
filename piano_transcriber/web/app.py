@@ -14,7 +14,7 @@ from typing import Dict, Any, Optional
 
 import uvicorn
 import torch
-import soundfile as sf
+import torchaudio
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -134,8 +134,8 @@ async def process_transcription(job_id: str):
         notes = transcriber.predictions_to_json(predictions)
         
         # Calculate duration from audio file
-        audio_info = sf.info(job["temp_path"])
-        duration = audio_info.duration
+        waveform, sample_rate = torchaudio.load(job["temp_path"], backend="soundfile")
+        duration = waveform.shape[1] / sample_rate
         
         # Update job with results (no binary data)
         job["status"] = "completed"

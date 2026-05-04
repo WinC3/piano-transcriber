@@ -31,6 +31,7 @@ pip install -e .
 ### Command Line Interface
 
 **Basic usage:**
+
 ```bash
 # Transcribe to MIDI
 piano-transcriber input.wav -o output.mid
@@ -40,6 +41,7 @@ piano-transcriber input.wav -f json -o output.json
 ```
 
 **Batch processing:**
+
 ```bash
 # Process multiple files
 piano-transcriber *.wav -o /path/to/output/
@@ -49,6 +51,7 @@ piano-transcriber input.wav --onset-threshold 0.3 --frame-threshold 0.4
 ```
 
 **Advanced options:**
+
 ```bash
 # Use specific model
 piano-transcriber input.wav -m path/to/model.pth
@@ -78,10 +81,54 @@ midi = transcriber.predictions_to_midi(predictions, "output.mid")
 notes = transcriber.predictions_to_json(predictions)
 ```
 
+### Web Application
+
+A browser-based interface with drag-and-drop upload and MIDI download.
+
+**Local development:**
+
+```bash
+pip install -r piano_transcriber/web/requirements-web.txt
+
+cd piano_transcriber/web
+python run_server.py
+```
+
+Then open http://localhost:8000
+
+**With auto-reload for development:**
+
+```bash
+python run_server.py --reload --port 8080
+```
+
+### Docker Deployment
+
+**Build and run with Docker Compose:**
+
+```bash
+docker-compose up --build
+```
+
+**Access the web interface at** http://localhost:8000
+
+**With nginx reverse proxy (production):**
+
+```bash
+docker-compose --profile production up --build
+```
+
+**Manual Docker build:**
+
+```bash
+docker build -f Dockerfile.web -t piano-transcriber-web .
+docker run -p 8000:8000 piano-transcriber-web
+```
+
 ## Supported Audio Formats
 
 - WAV (.wav)
-- MP3 (.mp3) 
+- MP3 (.mp3)
 - FLAC (.flac)
 - M4A (.m4a)
 - OGG (.ogg)
